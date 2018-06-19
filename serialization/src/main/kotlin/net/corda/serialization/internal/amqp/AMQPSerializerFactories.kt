@@ -7,6 +7,5 @@ import net.corda.core.serialization.SerializationContext
 fun createSerializerFactoryFactory(): SerializerFactoryFactory = SerializerFactoryFactoryImpl()
 
 open class SerializerFactoryFactoryImpl : SerializerFactoryFactory {
-    override fun make(context: SerializationContext) =
-            SerializerFactory(context.whitelist, context.deserializationClassLoader)
+    override fun make(context: SerializationContext): SerializerFactory = SerializerFactory.fromContext(context)
 }
