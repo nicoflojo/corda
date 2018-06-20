@@ -29,18 +29,18 @@ class AMQPClientSerializationScheme(
 
     companion object {
         /** Call from main only. */
-        fun initialiseSerialization() {
-            nodeSerializationEnv = createSerializationEnv()
+        fun initialiseSerialization(classLoader: ClassLoader? = null) {
+            nodeSerializationEnv = createSerializationEnv(classLoader)
         }
 
-        fun createSerializationEnv(): SerializationEnvironment {
+        fun createSerializationEnv(classLoader: ClassLoader? = null): SerializationEnvironment {
             return SerializationEnvironmentImpl(
                     SerializationFactoryImpl().apply {
                         registerScheme(AMQPClientSerializationScheme(emptyList()))
                     },
                     storageContext = AMQP_STORAGE_CONTEXT,
                     p2pContext = AMQP_P2P_CONTEXT,
-                    rpcClientContext = AMQP_RPC_CLIENT_CONTEXT,
+                    rpcClientContext = if (classLoader!= null) AMQP_RPC_CLIENT_CONTEXT.withClassLoader(classLoader) else AMQP_RPC_CLIENT_CONTEXT ,
                     rpcServerContext = AMQP_RPC_SERVER_CONTEXT)
         }
     }
@@ -50,7 +50,9 @@ class AMQPClientSerializationScheme(
             target == SerializationContext.UseCase.RPCClient || target == SerializationContext.UseCase.P2P)
 
     override fun rpcClientSerializerFactory(context: SerializationContext): SerializerFactory {
-        return SerializerFactory(context.whitelist, ClassLoader.getSystemClassLoader()).apply {
+        return SerializerFactory(context.whitelist,
+                if (context.deserializationClassLoader != null) context.deserializationClassLoader else ClassLoader.getSystemClassLoader()
+        ).apply {
             register(RpcClientObservableSerializer)
             register(RpcClientCordaFutureSerializer(this))
             register(RxNotificationSerializer(this))
