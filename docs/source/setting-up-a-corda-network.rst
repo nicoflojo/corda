@@ -63,13 +63,13 @@ be done with the network bootstrapper. This is a tool that scans all the node co
 generate the network parameters file which is copied to the nodes' directories. It also copies each node's node-info file
 to every other node so that they can all transact with each other.
 
-The bootstrapper tool can be downloaded from https://downloads.corda.net/network-bootstrapper-corda-X.Y.jar, where ``X``
-is the major Corda version and ``Y`` is the minor Corda version.
+The bootstrapper tool can be downloaded from https://downloads.corda.net/network-bootstrapper-VERSION.jar, where ``VERSION``
+is the Corda version.
 
 To use it, create a directory containing a node config file, ending in "_node.conf", for each node you want to create.
 Then run the following command:
 
-``java -jar network-bootstrapper-corda-X.Y.jar <nodes-root-dir>``
+``java -jar network-bootstrapper-VERSION.jar --dir <nodes-root-dir>``
 
 For example running the command on a directory containing these files :
 
@@ -80,7 +80,7 @@ For example running the command on a directory containing these files :
     ├── partya_node.conf             // Party A's node.conf file
     └── partyb_node.conf             // Party B's node.conf file
 
-Would generate directories containing three nodes: notary, partya and partyb.
+will generate directories containing three nodes: notary, partya and partyb.
 
 This tool only bootstraps a network. It cannot dynamically update if a new node needs to join the network or if an existing
 one has changed something in their node-info, e.g. their P2P address. For this the new node-info file will need to be placed
@@ -88,12 +88,15 @@ in the other nodes' ``additional-node-infos`` directory. A simple way to do this
 However, if it's known beforehand the set of nodes that will eventually the node folders can be pregenerated in the bootstrap
 and only started when needed.
 
+The directory can also contain CorDapp jars which will be copied to each nodes' ``cordapps`` directory.
+
 Whitelisting Contracts
 ~~~~~~~~~~~~~~~~~~~~~~
 
-If you want to create a *Zone whitelist* (see :doc:`api-contract-constraints`), you can pass in a list of CorDapp jars:
+These CorDapp jars are also automatically used to create the *Zone whitelist* (see :doc:`api-contract-constraints`) for
+the network.
 
-``java -jar network-bootstrapper.jar <nodes-root-dir> <1st CorDapp jar> <2nd CorDapp jar> ..``
+.. note:: If you only wish to whitelist the CorDapps but not copy them to each node then run with the ``--no-copy`` flag.
 
 The CorDapp jars will be hashed and scanned for ``Contract`` classes. These contract class implementations will become part
 of the whitelisted contracts in the network parameters (see ``NetworkParameters.whitelistedContractImplementations`` :doc:`network-map`).
@@ -102,7 +105,7 @@ file) then the new set of contracts will be appended to the current whitelist.
 
 .. note:: The whitelist can only ever be appended to. Once added a contract implementation can never be removed.
 
-By default the bootstrapper tool will whitelist all the contracts found in all the CorDapp jars. To prevent certain
+By default the bootstrapper will whitelist all the contracts found in all the CorDapp jars. To prevent certain
 contracts from being whitelisted, add their fully qualified class name in the ``exclude_whitelist.txt``. These will instead
 use the more restrictive ``HashAttachmentConstraint``.
 
@@ -112,9 +115,6 @@ For example:
 
     net.corda.finance.contracts.asset.Cash
     net.corda.finance.contracts.asset.CommercialPaper
-
-In addition to using the CorDapp jars to update the whitelist, the bootstrapper will also copy them to all the nodes'
-``cordapps`` directory.
 
 Starting the nodes
 ~~~~~~~~~~~~~~~~~~

@@ -5,11 +5,8 @@ import com.typesafe.config.Config
 import com.typesafe.config.ConfigRenderOptions
 import io.netty.channel.unix.Errors
 import net.corda.core.crypto.Crypto
-import net.corda.core.internal.Emoji
+import net.corda.core.internal.*
 import net.corda.core.internal.concurrent.thenMatch
-import net.corda.core.internal.createDirectories
-import net.corda.core.internal.div
-import net.corda.core.internal.randomOrNull
 import net.corda.core.utilities.Try
 import net.corda.core.utilities.loggerFor
 import net.corda.node.CmdLineOptions
@@ -206,7 +203,7 @@ open class NodeStartup(val args: Array<String>) {
         logger.info("Revision: ${versionInfo.revision}")
         val info = ManagementFactory.getRuntimeMXBean()
         logger.info("PID: ${info.name.split("@").firstOrNull()}")  // TODO Java 9 has better support for this
-        logger.info("Main class: ${NodeConfiguration::class.java.protectionDomain.codeSource.location.toURI().path}")
+        logger.info("Main class: ${NodeConfiguration::class.java.location.toURI().path}")
         logger.info("CommandLine Args: ${info.inputArguments.joinToString(" ")}")
         logger.info("Application Args: ${args.joinToString(" ")}")
         logger.info("bootclasspath: ${info.bootClassPath}")

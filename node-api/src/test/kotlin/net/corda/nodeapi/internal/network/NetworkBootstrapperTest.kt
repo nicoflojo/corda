@@ -1,141 +1,263 @@
 package net.corda.nodeapi.internal.network
 
-import net.corda.core.contracts.ContractClassName
+import com.typesafe.config.ConfigFactory
+import net.corda.cordform.CordformNode.NODE_INFO_DIRECTORY
 import net.corda.core.crypto.SecureHash
-import net.corda.core.node.services.AttachmentId
-import net.corda.nodeapi.internal.ContractsJar
-import net.corda.testing.common.internal.testNetworkParameters
+import net.corda.core.crypto.secureRandomBytes
+import net.corda.core.identity.CordaX500Name
+import net.corda.core.internal.*
+import net.corda.core.node.NetworkParameters
+import net.corda.core.node.NodeInfo
+import net.corda.core.serialization.serialize
+import net.corda.core.utilities.OpaqueBytes
+import net.corda.node.services.config.NotaryConfig
+import net.corda.nodeapi.internal.DEV_ROOT_CA
+import net.corda.nodeapi.internal.config.parseAs
+import net.corda.nodeapi.internal.config.toConfig
+import net.corda.nodeapi.internal.network.NodeInfoFilesCopier.Companion.NODE_INFO_FILE_NAME_PREFIX
+import net.corda.testing.core.ALICE_NAME
+import net.corda.testing.core.BOB_NAME
+import net.corda.testing.core.DUMMY_NOTARY_NAME
+import net.corda.testing.core.SerializationEnvironmentRule
+import net.corda.testing.internal.createNodeInfoAndSigned
 import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatIllegalArgumentException
+import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.nio.file.Path
 
 class NetworkBootstrapperTest {
+    @Rule
+    @JvmField
+    val tempFolder = TemporaryFolder()
+
+    @Rule
+    @JvmField
+    val testSerialization = SerializationEnvironmentRule()
+
+    private val fakeEmbeddedCordaJar = fakeFileBytes()
+
+    private val contractsJars = HashMap<Path, TestContractsJar>()
+    private val nodeInfoFiles = HashMap<CordaX500Name, NodeInfoInfo>()
+    
+    private val bootstrapper = NetworkBootstrapper(
+            initSerEnv = false,
+            embeddedCordaJar = fakeEmbeddedCordaJar::inputStream,
+            nodeInfosGenerator = { nodeDirs ->
+                nodeDirs.map { nodeDir ->
+                    val name = parseFakeNodeConfig(nodeDir).myLegalName
+                    // Return back the same node info file if the node is asked to generate again. This is what the real
+                    // node does if nothing related to NodeInfo has changed.
+                    val info = nodeInfoFiles.computeIfAbsent(name) {
+                        val (nodeInfo, signedNodeInfo) = createNodeInfoAndSigned(name)
+                        val bytes = signedNodeInfo.serialize().bytes
+                        val fileName = "$NODE_INFO_FILE_NAME_PREFIX${SecureHash.randomSHA256()}"
+                        (nodeDir / fileName).write(bytes)
+                        NodeInfoInfo(fileName, OpaqueBytes(bytes), nodeInfo)
+                    }
+                    nodeDir / info.fileName
+                }
+            },
+            contractsJarConverter = { contractsJars[it]!! }
+    )
+
+    private val aliceConfig = FakeNodeConfig(ALICE_NAME)
+    private val bobConfig = FakeNodeConfig(BOB_NAME)
+    private val notaryConfig = FakeNodeConfig(DUMMY_NOTARY_NAME, NotaryConfig(validating = true))
+
+    private val rootDir get() = tempFolder.root.toPath()
+
     @Test
-    fun `no jars against empty whitelist`() {
-        val whitelist = generateWhitelist(emptyMap(), emptyList(), emptyList())
-        assertThat(whitelist).isEmpty()
+    fun `empty dir`() {
+        assertThatThrownBy {
+            bootstrap()
+        }.hasMessage("No nodes found")
     }
 
     @Test
-    fun `no jars against single whitelist`() {
-        val existingWhitelist = mapOf("class1" to listOf(SecureHash.randomSHA256()))
-        val newWhitelist = generateWhitelist(existingWhitelist, emptyList(), emptyList())
-        assertThat(newWhitelist).isEqualTo(existingWhitelist)
-    }
-
-    @Test
-    fun `empty jar against empty whitelist`() {
-        val whitelist = generateWhitelist(emptyMap(), emptyList(), listOf(TestContractsJar(contractClassNames = emptyList())))
-        assertThat(whitelist).isEmpty()
-    }
-
-    @Test
-    fun `empty jar against single whitelist`() {
-        val existingWhitelist = mapOf("class1" to listOf(SecureHash.randomSHA256()))
-        val newWhitelist = generateWhitelist(existingWhitelist, emptyList(), listOf(TestContractsJar(contractClassNames = emptyList())))
-        assertThat(newWhitelist).isEqualTo(existingWhitelist)
-    }
-
-    @Test
-    fun `jar with single contract against empty whitelist`() {
-        val jar = TestContractsJar(contractClassNames = listOf("class1"))
-        val whitelist = generateWhitelist(emptyMap(), emptyList(), listOf(jar))
-        assertThat(whitelist).isEqualTo(mapOf(
-                "class1" to listOf(jar.hash)
-        ))
-    }
-
-    @Test
-    fun `single contract jar against single whitelist of different contract`() {
-        val class1JarHash = SecureHash.randomSHA256()
-        val existingWhitelist = mapOf("class1" to listOf(class1JarHash))
-        val jar = TestContractsJar(contractClassNames = listOf("class2"))
-        val whitelist = generateWhitelist(existingWhitelist, emptyList(), listOf(jar))
-        assertThat(whitelist).isEqualTo(mapOf(
-                "class1" to listOf(class1JarHash),
-                "class2" to listOf(jar.hash)
-        ))
-    }
-
-    @Test
-    fun `same jar with single contract`() {
-        val jarHash = SecureHash.randomSHA256()
-        val existingWhitelist = mapOf("class1" to listOf(jarHash))
-        val jar = TestContractsJar(hash = jarHash, contractClassNames = listOf("class1"))
-        val newWhitelist = generateWhitelist(existingWhitelist, emptyList(), listOf(jar))
-        assertThat(newWhitelist).isEqualTo(existingWhitelist)
-    }
-
-    @Test
-    fun `jar with updated contract`() {
-        val previousJarHash = SecureHash.randomSHA256()
-        val existingWhitelist = mapOf("class1" to listOf(previousJarHash))
-        val newContractsJar = TestContractsJar(contractClassNames = listOf("class1"))
-        val newWhitelist = generateWhitelist(existingWhitelist, emptyList(), listOf(newContractsJar))
-        assertThat(newWhitelist).isEqualTo(mapOf(
-                "class1" to listOf(previousJarHash, newContractsJar.hash)
-        ))
-    }
-
-    @Test
-    fun `jar with one existing contract and one new one`() {
-        val previousJarHash = SecureHash.randomSHA256()
-        val existingWhitelist = mapOf("class1" to listOf(previousJarHash))
-        val newContractsJar = TestContractsJar(contractClassNames = listOf("class1", "class2"))
-        val newWhitelist = generateWhitelist(existingWhitelist, emptyList(), listOf(newContractsJar))
-        assertThat(newWhitelist).isEqualTo(mapOf(
-                "class1" to listOf(previousJarHash, newContractsJar.hash),
-                "class2" to listOf(newContractsJar.hash)
-        ))
-    }
-
-    @Test
-    fun `two versions of the same contract`() {
-        val version1Jar = TestContractsJar(contractClassNames = listOf("class1"))
-        val version2Jar = TestContractsJar(contractClassNames = listOf("class1"))
-        val newWhitelist = generateWhitelist(emptyMap(), emptyList(), listOf(version1Jar, version2Jar))
-        assertThat(newWhitelist).isEqualTo(mapOf(
-                "class1" to listOf(version1Jar.hash, version2Jar.hash)
-        ))
-    }
-
-    @Test
-    fun `jar with single new contract that's excluded`() {
-        val jar = TestContractsJar(contractClassNames = listOf("class1"))
-        val whitelist = generateWhitelist(emptyMap(), listOf("class1"), listOf(jar))
-        assertThat(whitelist).isEmpty()
-    }
-
-    @Test
-    fun `jar with two new contracts, one of which is excluded`() {
-        val jar = TestContractsJar(contractClassNames = listOf("class1", "class2"))
-        val whitelist = generateWhitelist(emptyMap(), listOf("class1"), listOf(jar))
-        assertThat(whitelist).isEqualTo(mapOf(
-                "class2" to listOf(jar.hash)
-        ))
-    }
-
-    @Test
-    fun `jar with updated contract but it's excluded`() {
-        val existingWhitelist = mapOf("class1" to listOf(SecureHash.randomSHA256()))
-        val jar = TestContractsJar(contractClassNames = listOf("class1"))
-        assertThatIllegalArgumentException().isThrownBy {
-            generateWhitelist(existingWhitelist, listOf("class1"), listOf(jar))
+    fun `single node conf file`() {
+        val (configFile) = createNodeConfFile("node1", bobConfig)
+        bootstrap()
+        assertThat(configFile).doesNotExist()
+        val networkParameters = assertBootstrappedNetwork(fakeEmbeddedCordaJar, "node1" to bobConfig)
+        networkParameters.run {
+            assertThat(epoch).isEqualTo(1)
+            assertThat(notaries).isEmpty()
+            assertThat(whitelistedContractImplementations).isEmpty()
         }
     }
 
-    private fun generateWhitelist(existingWhitelist: Map<String, List<AttachmentId>>,
-                                  excludeContracts: List<ContractClassName>,
-                                  contractJars: List<TestContractsJar>): Map<String, List<AttachmentId>> {
-        return generateWhitelist(
-                testNetworkParameters(whitelistedContractImplementations = existingWhitelist),
-                excludeContracts,
-                contractJars
-        )
+    @Test
+    fun `node conf file and corda jar`() {
+        createNodeConfFile("node1", bobConfig)
+        val fakeCordaJar = fakeFileBytes(rootDir / "corda.jar")
+        bootstrap()
+        assertBootstrappedNetwork(fakeCordaJar, "node1" to bobConfig)
     }
 
-    data class TestContractsJar(override val hash: SecureHash = SecureHash.randomSHA256(),
-                                private val contractClassNames: List<ContractClassName>) : ContractsJar {
-        override fun scan(): List<ContractClassName> = contractClassNames
+    @Test
+    fun `single node directory with just node conf file`() {
+        createNodeDir("bob", bobConfig)
+        bootstrap()
+        assertBootstrappedNetwork(fakeEmbeddedCordaJar, "bob" to bobConfig)
     }
+
+    @Test
+    fun `single node directory with node conf file and corda jar`() {
+        val nodeDir = createNodeDir("bob", bobConfig)
+        val fakeCordaJar = fakeFileBytes(nodeDir / "corda.jar")
+        bootstrap()
+        assertBootstrappedNetwork(fakeCordaJar, "bob" to bobConfig)
+    }
+
+    @Test
+    fun `single node directory with just corda jar`() {
+        val nodeCordaJar = (rootDir / "alice").createDirectories() / "corda.jar"
+        val fakeCordaJar = fakeFileBytes(nodeCordaJar)
+        assertThatThrownBy {
+            bootstrap()
+        }.hasMessageStartingWith("Missing node.conf in node directory alice")
+        assertThat(nodeCordaJar).hasBinaryContent(fakeCordaJar)  // Make sure the corda.jar is left untouched
+    }
+
+    @Test
+    fun `two node conf files, one of which is a notary`() {
+        createNodeConfFile("alice", aliceConfig)
+        createNodeConfFile("notary", notaryConfig)
+        bootstrap()
+        val networkParameters = assertBootstrappedNetwork(fakeEmbeddedCordaJar, "alice" to aliceConfig, "notary" to notaryConfig)
+        networkParameters.assertContainsNotary()
+    }
+
+    @Test
+    fun `two node conf files with the same legal name`() {
+        val (node1File, node1Conf) = createNodeConfFile("node1", aliceConfig)
+        val (node2File, node2Conf) = createNodeConfFile("node2", aliceConfig)
+        assertThatThrownBy {
+            bootstrap()
+        }.hasMessageContaining("Nodes must have unique legal names")
+        // Make sure the directory is left untouched
+        assertThat(rootDir.list()).containsOnly(node1File, node2File)
+        assertThat(node1File).hasContent(node1Conf)
+        assertThat(node2File).hasContent(node2Conf)
+    }
+
+    @Test
+    fun `one node directory and one node conf file`() {
+        createNodeConfFile("alice", aliceConfig)
+        createNodeDir("bob", bobConfig)
+        bootstrap()
+        assertBootstrappedNetwork(fakeEmbeddedCordaJar, "alice" to aliceConfig, "bob" to bobConfig)
+    }
+
+    @Test
+    fun `node conf file and CorDapp jar`() {
+        createNodeConfFile("alice", aliceConfig)
+        val cordappJarFile = rootDir / "sample-app.jar"
+        val cordappBytes = fakeFileBytes(cordappJarFile)
+        val contractsJar = TestContractsJar(contractClassNames = listOf("contract.class"))
+        contractsJars[cordappJarFile] = contractsJar
+        bootstrap()
+        val networkParameters = assertBootstrappedNetwork(fakeEmbeddedCordaJar, "alice" to aliceConfig)
+        assertThat(rootDir / "alice" / "cordapps" / "sample-app.jar").hasBinaryContent(cordappBytes)
+        assertThat(networkParameters.whitelistedContractImplementations).isEqualTo(mapOf(
+                "contract.class" to listOf(contractsJar.hash)
+        ))
+    }
+
+    @Test
+    fun `no copy CorDapps`() {
+        createNodeConfFile("alice", aliceConfig)
+        val cordappJarFile = rootDir / "sample-app.jar"
+        fakeFileBytes(cordappJarFile)
+        val contractsJar = TestContractsJar(contractClassNames = listOf("contract.class"))
+        contractsJars[cordappJarFile] = contractsJar
+        bootstrap(copyCordapps = false)
+        val networkParameters = assertBootstrappedNetwork(fakeEmbeddedCordaJar, "alice" to aliceConfig)
+        assertThat(rootDir / "alice" / "cordapps" / "sample-app.jar").doesNotExist()
+        assertThat(networkParameters.whitelistedContractImplementations).isEqualTo(mapOf(
+                "contract.class" to listOf(contractsJar.hash)
+        ))
+    }
+
+    @Test
+    fun `bootstrap same network again`() {
+        createNodeConfFile("alice", aliceConfig)
+        createNodeConfFile("notary", notaryConfig)
+        bootstrap()
+        val networkParameters1 = (rootDir / "alice").networkParameters
+        bootstrap()
+        val networkParameters2 = assertBootstrappedNetwork(fakeEmbeddedCordaJar, "alice" to aliceConfig, "notary" to notaryConfig)
+        assertThat(networkParameters1).isEqualTo(networkParameters2)
+    }
+
+    @Test
+    fun `add notary to existing network`() {
+        createNodeConfFile("alice", aliceConfig)
+        bootstrap()
+        createNodeConfFile("notary", notaryConfig)
+        val networkParameters = assertBootstrappedNetwork(fakeEmbeddedCordaJar, "alice" to aliceConfig, "notary" to notaryConfig)
+        networkParameters.assertContainsNotary()
+        assertThat(networkParameters.epoch).isEqualTo(2)
+    }
+
+    private fun fakeFileBytes(writeToFile: Path? = null): ByteArray {
+        val bytes = secureRandomBytes(128)
+        writeToFile?.write(bytes)
+        return bytes
+    }
+
+    private fun bootstrap(copyCordapps: Boolean = true) {
+        bootstrapper.bootstrap(rootDir, copyCordapps)
+    }
+
+    private fun createNodeConfFile(nodeDirName: String, config: FakeNodeConfig): Pair<Path, String> {
+        val file = rootDir / "${nodeDirName}_node.conf"
+        val configText = config.toConfig().root().render()
+        file.writeText(configText)
+        return Pair(file, configText)
+    }
+
+    private fun createNodeDir(nodeDirName: String, config: FakeNodeConfig): Path {
+        val nodeDir = (rootDir / nodeDirName).createDirectories()
+        (nodeDir / "node.conf").writeText(config.toConfig().root().render())
+        return nodeDir
+    }
+
+    private val Path.networkParameters: NetworkParameters get() {
+        return (this / NETWORK_PARAMS_FILE_NAME).readObject<SignedNetworkParameters>().verifiedNetworkMapCert(DEV_ROOT_CA.certificate)
+    }
+
+    private fun assertBootstrappedNetwork(cordaJar: ByteArray, vararg nodes: Pair<String, FakeNodeConfig>): NetworkParameters {
+        val networkParameters = (rootDir / nodes[0].first).networkParameters
+        for ((nodeDirName, config) in nodes) {
+            val nodeDir = rootDir / nodeDirName
+            assertThat(nodeDir / "corda.jar").hasBinaryContent(cordaJar)
+            assertThat(parseFakeNodeConfig(nodeDir)).isEqualTo(config)
+            assertThat(nodeDir.networkParameters).isEqualTo(networkParameters)
+            val nodeInfosDir = nodeDir / NODE_INFO_DIRECTORY
+            for ((fileName, bytes) in nodeInfoFiles.values) {
+                assertThat(nodeInfosDir / fileName).hasBinaryContent(bytes.bytes)
+            }
+        }
+        return networkParameters
+    }
+
+    private fun NetworkParameters.assertContainsNotary() {
+        assertThat(notaries).hasSize(1)
+        notaries[0].run {
+            assertThat(validating).isTrue()
+            assertThat(identity.name).isEqualTo(notaryConfig.myLegalName)
+            assertThat(identity.owningKey).isEqualTo(nodeInfoFiles[notaryConfig.myLegalName]!!.nodeInfo.legalIdentities[0].owningKey)
+        }
+    }
+
+    private fun parseFakeNodeConfig(nodeDir: Path): FakeNodeConfig {
+        return ConfigFactory.parseFile((nodeDir / "node.conf").toFile()).parseAs(FakeNodeConfig::class)
+    }
+
+    data class FakeNodeConfig(val myLegalName: CordaX500Name, val notary: NotaryConfig? = null)
+
+    private data class NodeInfoInfo(val fileName: String, val bytes: OpaqueBytes, val nodeInfo: NodeInfo)
 }
